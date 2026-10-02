@@ -1,8 +1,10 @@
 /**
- * API Service — DEMO MODE
+ * API Service — DEMO MODE (GitHub Pages)
  *
- * All responses are hardcoded mock data for GitHub Pages deployment.
- * In production, these functions call the FastAPI backend.
+ * All data is parsed directly from "Time Table AIML 5th sem.pdf"
+ * (AIML 5th Semester, Sections A, B, C — wef August 2026)
+ *
+ * In production, these functions call the FastAPI backend at /api.
  */
 
 import type {
@@ -10,144 +12,273 @@ import type {
   TimetableUpload,
   TimetablePreview,
   Room,
+  ScheduleEntry,
 } from "../types/timetable";
 
 /* ── Helpers ──────────────────────────────────────────────────────── */
-
-/** Simulates a realistic network delay */
 const delay = (ms = 600) => new Promise((res) => setTimeout(res, ms));
 
-/* ── Mock Data ────────────────────────────────────────────────────── */
-
-const MOCK_ROOMS: Room[] = [
-  { id: "1", room_number: "101", room_type: "Classroom", building: "A Block", capacity: 60 },
-  { id: "2", room_number: "102", room_type: "Classroom", building: "A Block", capacity: 60 },
-  { id: "3", room_number: "201", room_type: "Lab", building: "A Block", capacity: 30 },
-  { id: "4", room_number: "202", room_type: "Lab", building: "A Block", capacity: 30 },
-  { id: "5", room_number: "301", room_type: "Classroom", building: "B Block", capacity: 60 },
-  { id: "6", room_number: "302", room_type: "Classroom", building: "B Block", capacity: 60 },
-  { id: "7", room_number: "401", room_type: "Seminar Hall", building: "B Block", capacity: 120 },
-  { id: "8", room_number: "CS Lab 1", room_type: "Lab", building: "C Block", capacity: 40 },
-  { id: "9", room_number: "CS Lab 2", room_type: "Lab", building: "C Block", capacity: 40 },
-  { id: "10", room_number: "DS Lab", room_type: "Lab", building: "C Block", capacity: 40 },
-];
-
-/** Deterministically picks available/occupied rooms based on day+time so results feel realistic */
-function mockAvailability(day: string, startTime: string, endTime: string): AvailabilityResult {
-  // Seed based on inputs so same query always gives same result
-  const seed = (day + startTime + endTime).split("").reduce((a, c) => a + c.charCodeAt(0), 0);
-  const availableCount = 4 + (seed % 5); // 4–8 available rooms
-  const available = MOCK_ROOMS.slice(0, availableCount).map((r) => ({
-    room_number: r.room_number,
-    room_type: r.room_type,
-  }));
-  const occupied = MOCK_ROOMS.slice(availableCount).map((r) => ({
-    room_number: r.room_number,
-    room_type: r.room_type,
-  }));
-  return {
-    day,
-    start_time: startTime,
-    end_time: endTime,
-    total_rooms: MOCK_ROOMS.length,
-    available_count: available.length,
-    occupied_count: occupied.length,
-    available_rooms: available,
-    occupied_rooms: occupied,
-  };
-}
-
-const MOCK_TIMETABLES: TimetableUpload[] = [
-  {
-    id: "tbl-001",
-    filename: "AIML_5th_Sem_Timetable.pdf",
-    uploaded_at: "2026-09-15T10:30:00Z",
-    status: "APPROVED",
-    entries_count: 48,
-    rooms_count: 8,
-  },
-  {
-    id: "tbl-002",
-    filename: "CS_3rd_Sem_Timetable.pdf",
-    uploaded_at: "2026-09-20T14:00:00Z",
-    status: "APPROVED",
-    entries_count: 42,
-    rooms_count: 7,
-  },
-];
-
-const MOCK_PREVIEW: TimetablePreview = {
-  upload_id: "tbl-001",
-  filename: "AIML_5th_Sem_Timetable.pdf",
-  status: "APPROVED",
-  entries_count: 6,
-  rooms_count: 3,
-  entries: [
-    { room_number: "101", day: "Monday", start_time: "09:00", end_time: "10:30", subject: "Machine Learning", faculty: "Dr. Sharma", section: "A" },
-    { room_number: "CS Lab 1", day: "Monday", start_time: "11:00", end_time: "13:00", subject: "Deep Learning Lab", faculty: "Dr. Verma", section: "B" },
-    { room_number: "201", day: "Tuesday", start_time: "09:00", end_time: "10:30", subject: "Data Science", faculty: "Dr. Patel", section: "A" },
-    { room_number: "301", day: "Wednesday", start_time: "10:30", end_time: "12:00", subject: "NLP", faculty: "Dr. Sharma", section: "A" },
-    { room_number: "102", day: "Thursday", start_time: "14:00", end_time: "15:30", subject: "Computer Vision", faculty: "Dr. Gupta", section: "B" },
-    { room_number: "CS Lab 2", day: "Friday", start_time: "09:00", end_time: "11:00", subject: "ML Lab", faculty: "Dr. Patel", section: "A" },
-  ],
+/* ── Time slot mapping (slot index → time range) ─────────────────── */
+const SLOT_TIMES: Record<number, [string, string]> = {
+  1:  ["09:00", "09:50"],
+  2:  ["09:50", "10:40"],
+  3:  ["10:40", "11:30"],
+  4:  ["11:30", "12:20"],
+  5:  ["12:20", "13:10"],
+  6:  ["13:10", "14:00"],
+  7:  ["14:00", "14:50"],
+  8:  ["14:50", "15:40"],
+  9:  ["15:40", "16:30"],
+  10: ["16:30", "17:20"],
 };
 
-/* ── Availability ─────────────────────────────────────────────────── */
+/* ── Real schedule data (parsed from AIML 5th Sem timetable PDF) ──── */
+// Format: [day, slotIndex, roomNumber, subject, section]
+const RAW_SCHEDULE: [string, number, string, string, string][] = [
+  // ── Section A ────────────────────────────────────────────────────
+  ["Monday",    3,  "214", "DAA",           "A"],
+  ["Monday",    4,  "214", "PEM",           "A"],
+  ["Monday",    5,  "214", "FDL",           "A"],
+  ["Monday",    7,  "214", "Seminar",       "A"],
+  ["Monday",    8,  "214", "OS",            "A"],
+  ["Monday",    9,  "214", "COA",           "A"],
+  ["Tuesday",   2,  "215", "IIOT",          "A"],
+  ["Tuesday",   3,  "215", "OS",            "A"],
+  ["Tuesday",   4,  "215", "FDL",           "A"],
+  ["Tuesday",   5,  "202", "OS Lab",        "A"],
+  ["Tuesday",   5,  "105", "IIOT Lab",      "A"],
+  ["Tuesday",   8,  "607", "PEM",           "A"],
+  ["Tuesday",   9,  "105", "IIOT Lab",      "A"],
+  ["Tuesday",   9,  "408", "OS Lab",        "A"],
+  ["Wednesday", 1,  "408", "FDL Lab",       "A"],
+  ["Wednesday", 1,  "411", "DAA Lab",       "A"],
+  ["Wednesday", 3,  "606", "DAA",           "A"],
+  ["Wednesday", 4,  "212", "COA",           "A"],
+  ["Wednesday", 5,  "214", "Mentoring",     "A"],
+  ["Wednesday", 7,  "411", "VAC",           "A"],
+  ["Wednesday", 7,  "408", "TTPPR",         "A"],
+  ["Thursday",  1,  "203", "DAA Lab",       "A"],
+  ["Thursday",  1,  "510", "FDL Lab",       "A"],
+  ["Thursday",  3,  "215", "IIOT",          "A"],
+  ["Thursday",  4,  "215", "COA",           "A"],
+  ["Thursday",  6,  "214", "DAA",           "A"],
+  ["Thursday",  7,  "214", "OS",            "A"],
+  ["Thursday",  8,  "214", "FDL",           "A"],
+  ["Friday",    1,  "214", "IIOT",          "A"],
+  ["Friday",    2,  "214", "OS",            "A"],
+  ["Friday",    4,  "214", "DAA",           "A"],
+  ["Friday",    5,  "214", "FDL",           "A"],
 
+  // ── Section B ────────────────────────────────────────────────────
+  ["Monday",    2,  "607", "IIOT",          "B"],
+  ["Monday",    3,  "607", "OS",            "B"],
+  ["Monday",    4,  "607", "DAA",           "B"],
+  ["Monday",    5,  "105", "IIOT Lab",      "B"],
+  ["Monday",    5,  "408", "OS Lab",        "B"],
+  ["Monday",    8,  "211", "FDL",           "B"],
+  ["Monday",    9,  "611", "DAA Lab",       "B"],
+  ["Monday",    9,  "612", "FDL Lab",       "B"],
+  ["Tuesday",   1,  "207", "IIOT",          "B"],
+  ["Tuesday",   2,  "309", "DAA",           "B"],
+  ["Tuesday",   4,  "210", "COA",           "B"],
+  ["Tuesday",   5,  "215", "FDL",           "B"],
+  ["Wednesday", 2,  "214", "PEM",           "B"],
+  ["Wednesday", 3,  "214", "OS",            "B"],
+  ["Wednesday", 5,  "215", "Seminar",       "B"],
+  ["Wednesday", 6,  "212", "FDL",           "B"],
+  ["Wednesday", 7,  "411", "VAC",           "B"],
+  ["Wednesday", 7,  "408", "TTPPR",         "B"],
+  ["Thursday",  1,  "610", "OS Lab",        "B"],
+  ["Thursday",  1,  "511", "FDL Lab",       "B"],
+  ["Thursday",  3,  "212", "COA",           "B"],
+  ["Thursday",  4,  "214", "DAA",           "B"],
+  ["Thursday",  6,  "212", "OS",            "B"],
+  ["Thursday",  7,  "215", "FDL",           "B"],
+  ["Thursday",  8,  "215", "IIOT",          "B"],
+  ["Friday",    1,  "215", "PEM",           "B"],
+  ["Friday",    2,  "215", "DAA",           "B"],
+  ["Friday",    4,  "207", "OS",            "B"],
+  ["Friday",    5,  "105", "IIOT Lab",      "B"],
+  ["Friday",    5,  "408", "DAA Lab",       "B"],
+  ["Friday",    7,  "215", "COA",           "B"],
+  ["Friday",    8,  "215", "Mentoring",     "B"],
+
+  // ── Section C ────────────────────────────────────────────────────
+  ["Monday",    2,  "215", "OS",            "C"],
+  ["Monday",    3,  "202", "FDL Lab",       "C"],
+  ["Monday",    3,  "415", "DAA Lab",       "C"],
+  ["Monday",    7,  "215", "DAA",           "C"],
+  ["Monday",    8,  "211", "COA",           "C"],
+  ["Monday",    9,  "215", "IIOT",          "C"],
+  ["Monday",    9,  "411", "OS Lab",        "C"],
+  ["Monday",    9,  "105", "IIOT Lab",      "C"],
+  ["Tuesday",   3,  "214", "IIOT",          "C"],
+  ["Tuesday",   4,  "214", "FDL",           "C"],
+  ["Tuesday",   6,  "214", "DAA",           "C"],
+  ["Tuesday",   7,  "214", "COA",           "C"],
+  ["Tuesday",   8,  "214", "OS",            "C"],
+  ["Tuesday",   9,  "214", "PEM",           "C"],
+  ["Wednesday", 1,  "105", "IIOT Lab",      "C"],
+  ["Wednesday", 1,  "202", "OS Lab",        "C"],
+  ["Wednesday", 3,  "215", "FDL",           "C"],
+  ["Wednesday", 4,  "214", "DAA",           "C"],
+  ["Wednesday", 6,  "215", "OS",            "C"],
+  ["Wednesday", 7,  "411", "VAC",           "C"],
+  ["Wednesday", 7,  "408", "TTPPR",         "C"],
+  ["Thursday",  1,  "215", "PEM",           "C"],
+  ["Thursday",  2,  "215", "OS",            "C"],
+  ["Thursday",  4,  "614", "Seminar",       "C"],
+  ["Thursday",  5,  "215", "FDL",           "C"],
+  ["Thursday",  6,  "215", "DAA",           "C"],
+  ["Friday",    1,  "408", "DAA Lab",       "C"],
+  ["Friday",    1,  "411", "FDL Lab",       "C"],
+  ["Friday",    4,  "215", "COA",           "C"],
+  ["Friday",    5,  "215", "FDL",           "C"],
+  ["Friday",    6,  "210", "IIOT",          "C"],
+  ["Friday",    7,  "406", "Mentoring",     "C"],
+];
+
+/* ── All rooms extracted from the timetable ──────────────────────── */
+const ROOM_TYPE_MAP: Record<string, string> = {
+  "105": "Classroom", "202": "Classroom", "203": "Classroom",
+  "207": "Classroom", "210": "Classroom", "211": "Classroom",
+  "212": "Classroom", "214": "Classroom", "215": "Classroom",
+  "309": "Classroom", "406": "Classroom", "408": "Classroom",
+  "411": "Seminar Hall", "415": "Classroom", "510": "Classroom",
+  "511": "Classroom", "606": "Classroom", "607": "Classroom",
+  "610": "Classroom", "611": "Classroom", "612": "Classroom",
+  "614": "Seminar Hall",
+};
+
+const ALL_ROOMS: Room[] = Object.entries(ROOM_TYPE_MAP).map(([num, type], i) => ({
+  id: String(i + 1),
+  room_number: num,
+  room_type: type,
+  building: "VIPS-TC",
+}));
+
+/* ── Schedule entries for display ────────────────────────────────── */
+const SCHEDULE_ENTRIES: ScheduleEntry[] = RAW_SCHEDULE.map(
+  ([day, slot, room, subject, section]) => {
+    const [start_time, end_time] = SLOT_TIMES[slot];
+    return { room_number: room, day, start_time, end_time, subject, section };
+  }
+);
+
+/* ── Core availability logic ─────────────────────────────────────── */
+function timeToMinutes(t: string): number {
+  const [h, m] = t.split(":").map(Number);
+  return h * 60 + m;
+}
+
+function slotsOverlap(
+  slotStart: string, slotEnd: string,
+  queryStart: string, queryEnd: string
+): boolean {
+  const ss = timeToMinutes(slotStart);
+  const se = timeToMinutes(slotEnd);
+  const qs = timeToMinutes(queryStart);
+  const qe = timeToMinutes(queryEnd);
+  return ss < qe && se > qs;
+}
+
+/* ── Availability ─────────────────────────────────────────────────── */
 export async function searchAvailability(
   day: string,
   startTime: string,
   endTime: string
 ): Promise<AvailabilityResult> {
   await delay(700);
-  return mockAvailability(day, startTime, endTime);
+
+  const occupiedRoomNumbers = new Set<string>();
+  for (const [d, slot, room] of RAW_SCHEDULE) {
+    if (d !== day) continue;
+    const [slotStart, slotEnd] = SLOT_TIMES[slot];
+    if (slotsOverlap(slotStart, slotEnd, startTime, endTime)) {
+      occupiedRoomNumbers.add(room);
+    }
+  }
+
+  const availableRooms = ALL_ROOMS
+    .filter((r) => !occupiedRoomNumbers.has(r.room_number))
+    .map((r) => ({ room_number: r.room_number, room_type: r.room_type }));
+
+  const occupiedRooms = ALL_ROOMS
+    .filter((r) => occupiedRoomNumbers.has(r.room_number))
+    .map((r) => ({ room_number: r.room_number, room_type: r.room_type }));
+
+  return {
+    day,
+    start_time: startTime,
+    end_time: endTime,
+    total_rooms: ALL_ROOMS.length,
+    available_count: availableRooms.length,
+    occupied_count: occupiedRooms.length,
+    available_rooms: availableRooms,
+    occupied_rooms: occupiedRooms,
+  };
 }
 
 /* ── Timetable ────────────────────────────────────────────────────── */
-
 export async function uploadTimetable(_file: File): Promise<TimetableUpload> {
   await delay(1500);
-  // Demo: always return a mock "uploaded" result
   return {
-    id: "tbl-demo",
+    id: "tbl-demo-upload",
     filename: _file.name,
     uploaded_at: new Date().toISOString(),
     status: "REVIEW",
-    entries_count: 36,
-    rooms_count: 6,
+    entries_count: 96,
+    rooms_count: 22,
   };
 }
 
 export async function listTimetables(): Promise<TimetableUpload[]> {
-  await delay(500);
-  return MOCK_TIMETABLES;
+  await delay(400);
+  return [
+    {
+      id: "tbl-aiml-5th",
+      filename: "Time Table AIML 5th sem.pdf",
+      uploaded_at: "2026-08-01T09:00:00Z",
+      status: "APPROVED",
+      entries_count: 96,
+      rooms_count: 22,
+    },
+  ];
 }
 
 export async function getTimetablePreview(_id: string): Promise<TimetablePreview> {
-  await delay(500);
-  return MOCK_PREVIEW;
+  await delay(400);
+  return {
+    upload_id: "tbl-aiml-5th",
+    filename: "Time Table AIML 5th sem.pdf",
+    status: "APPROVED",
+    entries_count: SCHEDULE_ENTRIES.length,
+    rooms_count: ALL_ROOMS.length,
+    entries: SCHEDULE_ENTRIES.slice(0, 20), // show first 20 for preview
+  };
 }
 
 export async function approveTimetable(
   _id: string
 ): Promise<{ message: string; rooms_created: number; entries_created: number }> {
   await delay(800);
-  return { message: "Timetable approved successfully.", rooms_created: 3, entries_created: 6 };
+  return {
+    message: "Timetable approved successfully.",
+    rooms_created: ALL_ROOMS.length,
+    entries_created: SCHEDULE_ENTRIES.length,
+  };
 }
 
 export async function deleteTimetable(_id: string): Promise<void> {
   await delay(500);
-  // Demo: no-op
 }
 
 export async function deleteEntry(_uploadId: string, _entryIndex: number): Promise<void> {
   await delay(300);
-  // Demo: no-op
 }
 
 /* ── Rooms ────────────────────────────────────────────────────────── */
-
 export async function listRooms(): Promise<Room[]> {
   await delay(400);
-  return MOCK_ROOMS;
+  return ALL_ROOMS;
 }
